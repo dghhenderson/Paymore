@@ -20,6 +20,10 @@ def _load_budget(path_str: str):
     return parse_pro_forma_workbook(path_str)
 
 
+def _plot(fig, key: str) -> None:
+    st.plotly_chart(fig, use_container_width=True, key=key)
+
+
 def _currency(value) -> str:
     return "n/a" if pd.isna(value) else f"${value:,.0f}"
 
@@ -382,11 +386,11 @@ with tabs[0]:
     with row_one[0]:
         overview_revenue = comparison_display.copy()
         overview_revenue["revenue_actual"] = overview_revenue["revenue_display"]
-        st.plotly_chart(line_bar_chart(overview_revenue, "revenue", "Revenue vs Plan"), use_container_width=True)
+        _plot(line_bar_chart(overview_revenue, "revenue", "Revenue vs Plan"), "overview_revenue_vs_plan")
     with row_one[1]:
         overview_margin = comparison_display.copy()
         overview_margin["gross_margin_pct_actual"] = overview_margin["gross_margin_pct_display"]
-        st.plotly_chart(margin_trend_chart(overview_margin), use_container_width=True)
+        _plot(margin_trend_chart(overview_margin), "overview_margin_vs_plan")
 
     row_two = st.columns([0.95, 1.05])
     with row_two[0]:
@@ -405,7 +409,7 @@ with tabs[0]:
         st.markdown(f"Suggested safe monthly draw: **{_currency(base_flags.suggested_draw)}**")
         st.markdown("</div>", unsafe_allow_html=True)
     with row_two[1]:
-        st.plotly_chart(waterfall_chart(current_row), use_container_width=True)
+        _plot(waterfall_chart(current_row), "overview_revenue_to_cashflow")
 
 with tabs[1]:
     metric_for_table = st.selectbox(
@@ -418,29 +422,29 @@ with tabs[1]:
     with chart_row_1[0]:
         revenue_chart = comparison_display.copy()
         revenue_chart["revenue_actual"] = revenue_chart["revenue_display"]
-        st.plotly_chart(line_bar_chart(revenue_chart, "revenue", "Revenue vs Plan"), use_container_width=True)
+        _plot(line_bar_chart(revenue_chart, "revenue", "Revenue vs Plan"), "actuals_revenue_vs_plan")
     with chart_row_1[1]:
         margin_chart_frame = comparison_display.copy()
         margin_chart_frame["gross_margin_pct_actual"] = margin_chart_frame["gross_margin_pct_display"]
-        st.plotly_chart(line_bar_chart(margin_chart_frame, "gross_margin_pct", "Margin vs Plan", ".0%"), use_container_width=True)
+        _plot(line_bar_chart(margin_chart_frame, "gross_margin_pct", "Margin vs Plan", ".0%"), "actuals_margin_vs_plan")
 
     chart_row_2 = st.columns(2)
     with chart_row_2[0]:
         payroll_chart = comparison_display.copy()
         payroll_chart["payroll_actual"] = payroll_chart["payroll_display"]
-        st.plotly_chart(line_bar_chart(payroll_chart, "payroll", "Payroll vs Plan"), use_container_width=True)
+        _plot(line_bar_chart(payroll_chart, "payroll", "Payroll vs Plan"), "actuals_payroll_vs_plan")
     with chart_row_2[1]:
         nop_chart = comparison_display.copy()
         nop_chart["net_operating_profit_actual"] = nop_chart["net_operating_profit_display"]
-        st.plotly_chart(line_bar_chart(nop_chart, "net_operating_profit", "Operating Profit vs Plan"), use_container_width=True)
+        _plot(line_bar_chart(nop_chart, "net_operating_profit", "Operating Profit vs Plan"), "actuals_operating_profit_vs_plan")
 
     chart_row_3 = st.columns(2)
     with chart_row_3[0]:
         cashflow_chart = comparison_display.copy()
         cashflow_chart["cash_flow_actual"] = cashflow_chart["cash_flow_display"]
-        st.plotly_chart(line_bar_chart(cashflow_chart, "cash_flow", "Cash Flow vs Plan"), use_container_width=True)
+        _plot(line_bar_chart(cashflow_chart, "cash_flow", "Cash Flow vs Plan"), "actuals_cashflow_vs_plan")
     with chart_row_3[1]:
-        st.plotly_chart(variance_combo(comparison, metric_for_table, "Variance to Plan"), use_container_width=True)
+        _plot(variance_combo(comparison, metric_for_table, "Variance to Plan"), "actuals_variance_to_plan")
 
     st.markdown("#### Variance Table")
     variance_df = variance_table(comparison, metric_for_table)
@@ -495,7 +499,7 @@ with tabs[2]:
 
     chart_left, chart_right = st.columns([1.1, 0.9])
     with chart_left:
-        st.plotly_chart(scenario_cash_chart(scenario_frames, scenario_assumptions["Medium Case"]["cash_safety_threshold"]), use_container_width=True)
+        _plot(scenario_cash_chart(scenario_frames, scenario_assumptions["Medium Case"]["cash_safety_threshold"]), "scenario_cash_projection")
     with chart_right:
         scenario_df = scenario_summary_table(scenario_summaries)
         for col in [
@@ -523,12 +527,12 @@ with tabs[2]:
         metric_choice,
         f"Scenario Lens: {metric_choice.replace('_', ' ').title()}",
     )
-    st.plotly_chart(scenario_metric_fig, use_container_width=True)
+    _plot(scenario_metric_fig, "scenario_metric_lens")
 
 with tabs[3]:
     cash_left, cash_right = st.columns([1.25, 0.75])
     with cash_left:
-        st.plotly_chart(scenario_cash_chart(scenario_frames, safety_threshold), use_container_width=True)
+        _plot(scenario_cash_chart(scenario_frames, safety_threshold), "cash_planning_projection")
     with cash_right:
         st.markdown('<div class="pm-panel">', unsafe_allow_html=True)
         st.markdown("#### Cash Planning Summary")
@@ -544,18 +548,18 @@ with tabs[3]:
 with tabs[4]:
     op_row_1 = st.columns(2)
     with op_row_1[0]:
-        st.plotly_chart(operating_metrics_chart(comparison, "sales_count_actual", "Sales Count by Month", "#7BC043"), use_container_width=True)
+        _plot(operating_metrics_chart(comparison, "sales_count_actual", "Sales Count by Month", "#7BC043"), "ops_sales_count")
     with op_row_1[1]:
-        st.plotly_chart(operating_metrics_chart(comparison, "purchase_count_actual", "Purchase Count by Month", "#377DFF"), use_container_width=True)
+        _plot(operating_metrics_chart(comparison, "purchase_count_actual", "Purchase Count by Month", "#377DFF"), "ops_purchase_count")
 
     op_row_2 = st.columns(2)
     with op_row_2[0]:
-        st.plotly_chart(operating_metrics_chart(comparison, "avg_sale_value_actual", "Average Sale Value", "#F5B700"), use_container_width=True)
+        _plot(operating_metrics_chart(comparison, "avg_sale_value_actual", "Average Sale Value", "#F5B700"), "ops_avg_sale_value")
     with op_row_2[1]:
-        st.plotly_chart(operating_metrics_chart(comparison, "avg_purchase_value_actual", "Average Purchase Value", "#8E6CEF"), use_container_width=True)
+        _plot(operating_metrics_chart(comparison, "avg_purchase_value_actual", "Average Purchase Value", "#8E6CEF"), "ops_avg_purchase_value")
 
     op_row_3 = st.columns(2)
     with op_row_3[0]:
-        st.plotly_chart(operating_metrics_chart(comparison, "sales_per_staff_hour_actual", "Sales per Staff Hour", "#F45B69"), use_container_width=True)
+        _plot(operating_metrics_chart(comparison, "sales_per_staff_hour_actual", "Sales per Staff Hour", "#F45B69"), "ops_sales_per_staff_hour")
     with op_row_3[1]:
-        st.plotly_chart(operating_metrics_chart(comparison, "inventory_value_actual", "Inventory Value", "#17B7A5"), use_container_width=True)
+        _plot(operating_metrics_chart(comparison, "inventory_value_actual", "Inventory Value", "#17B7A5"), "ops_inventory_value")
