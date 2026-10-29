@@ -4,28 +4,79 @@ import pandas as pd
 import streamlit as st
 
 from paymore_dashboard.actuals import REQUIRED_COLUMNS, OPTIONAL_COLUMNS, actuals_template, load_actuals_upload, normalize_actuals, sample_actuals
-from paymore_dashboard.charts import line_bar_chart, margin_trend_chart, multi_scenario_metric_chart, operating_metrics_chart, scenario_cash_chart, variance_combo, waterfall_chart
+from paymore_dashboard.charts import SCENARIO_COLORS, line_bar_chart, margin_trend_chart, multi_scenario_metric_chart, operating_metrics_chart, scenario_cash_chart, variance_combo, waterfall_chart
 from paymore_dashboard.ingestion.pro_forma_parser import parse_pro_forma_workbook
 from paymore_dashboard.models import DEFAULT_PRO_FORMA
 from paymore_dashboard.planning import align_plan, blend_actuals_to_plan, build_comparison, current_month_projection, evaluate_cash_flags, project_scenario, scenario_summary_table, summarize_scenario, variance_table, year_run_rate_projection
-from paymore_dashboard.ui.theme import inject_theme
+from paymore_dashboard.ui.theme import TOKENS, inject_theme
 
 
 CURRENT_DATE = pd.Timestamp("2026-03-20")
+METRIC_LABELS = {
+    "revenue": "Revenue",
+    "gross_margin_pct": "Gross margin",
+    "gross_profit": "Gross profit",
+    "payroll": "Payroll",
+    "net_operating_profit": "Operating profit",
+    "cash_flow": "Cash flow",
+    "cash_balance": "Cash balance",
+}
 
-st.set_page_config(page_title="PayMore Chinook Operator Dashboard", page_icon=":bar_chart:", layout="wide")
+st.set_page_config(page_title="PayMore Chinook Command", page_icon=":material/monitoring:", layout="wide")
 inject_theme()
+
+
 @st.cache_data(show_spinner=False)
 def _load_budget(path_str: str):
     return parse_pro_forma_workbook(path_str)
 
 
 def _plot(fig, key: str) -> None:
-    st.plotly_chart(fig, use_container_width=True, key=key)
+    with st.container(border=True, key=f"card_{key}"):
+        st.plotly_chart(fig, width="stretch", theme=None, key=key, config={"displayModeBar": False})
+
+
+def _html(markup: str) -> None:
+    # Strip indentation so Markdown never treats the HTML as a code block.
+    st.markdown("".join(line.strip() for line in markup.splitlines()), unsafe_allow_html=True)
+
+
+def _rows(items: list[tuple[str, str]]) -> str:
+    return "".join(f'<div class="pm-row"><span>{label}</span><span>{value}</span></div>' for label, value in items)
+
+
+def _stats(items: list[tuple[str, str]], cols: int = 2) -> str:
+    cells = "".join(
+        f'<div class="pm-stat"><div class="pm-stat-label">{label}</div><div class="pm-stat-value">{value}</div></div>'
+        for label, value in items
+    )
+    return f'<div class="pm-stats{" cols-1" if cols == 1 else ""}">{cells}</div>'
+
+
+def _sparkline(values, color: str, width: int = 96, height: int = 32) -> str:
+    points = [float(v) for v in pd.to_numeric(pd.Series(values), errors="coerce").dropna()]
+    if len(points) < 2:
+        return ""
+    low, high = min(points), max(points)
+    span = (high - low) or 1.0
+    step = width / (len(points) - 1)
+    coords = [(i * step, height - 3 - (v - low) / span * (height - 6)) for i, v in enumerate(points)]
+    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in coords)
+    area = f"0,{height} {line} {width},{height}"
+    last_x, last_y = coords[-1]
+    return (
+        f'<svg class="pm-spark" width="{width}" height="{height}" viewBox="0 0 {width} {height}" fill="none">'
+        f'<polygon points="{area}" fill="{color}" fill-opacity="0.12"/>'
+        f'<polyline points="{line}" stroke="{color}" stroke-width="1.75" stroke-linejoin="round" stroke-linecap="round"/>'
+        f'<circle cx="{last_x:.1f}" cy="{last_y:.1f}" r="2.5" fill="{color}"/>'
+        "</svg>"
+    )
 
 
 def _currency(value) -> str:
-    return "n/a" if pd.isna(value) else f"${value:,.0f}"
+    if pd.isna(value):
+        return "n/a"
+    return f"-${abs(value):,.0f}" if value < 0 else f"${value:,.0f}"
 
 
 def _pct(value) -> str:
@@ -46,8 +97,11 @@ def _first_numeric(series: pd.Series, fallback: float) -> float:
 
 
 def _scenario_inputs(column, name: str, defaults: dict[str, float]) -> dict[str, float]:
-    with column:
-        st.markdown(f"#### {name}")
+    with column, st.container(border=True, key=f"card_inputs_{name.replace(' ', '_')}"):
+        _html(
+            f'<div class="pm-scenario-head"><span class="pm-scenario-dot" style="--tone:{SCENARIO_COLORS.get(name, TOKENS["muted"])};"></span>'
+            f'<span class="pm-scenario-name">{name}</span></div>'
+        )
         revenue_change_pct = st.slider("Revenue growth %", -0.40, 0.40, float(defaults["revenue_change_pct"]), 0.01, key=f"{name}_revenue_change_pct")
         gross_margin_pct = st.slider("Gross margin %", 0.10, 0.80, float(defaults["gross_margin_pct"]), 0.01, key=f"{name}_gross_margin_pct")
         staff_count = st.number_input("Number of staff", min_value=1, value=int(defaults["staff_count"]), step=1, key=f"{name}_staff_count")
@@ -85,43 +139,53 @@ def _scenario_draw_warning(plan: pd.DataFrame, actuals: pd.DataFrame, assumption
     return with_draw_flags.required_injection > without_draw_flags.required_injection
 
 
-def _metric_card(label: str, value: str, kicker: str, tone: str = "#54A52A") -> None:
-    status_bg = "rgba(34,197,94,.12)"
-    status_fg = "#22C55E"
-    status = "On Track"
-    if tone == "#F59E0B":
-        status_bg = "rgba(245,158,11,.16)"
-        status_fg = "#F59E0B"
-        status = "Watch"
-    if tone == "#EF4444":
-        status_bg = "rgba(239,68,68,.14)"
-        status_fg = "#EF4444"
-        status = "Risk"
-    st.markdown(
+TONE_LABELS = {
+    TOKENS["positive"]: "On track",
+    TOKENS["warning"]: "Watch",
+    TOKENS["negative"]: "At risk",
+}
+
+
+def _metric_card(label: str, value: str, tone: str, plan_label: str, plan_value: str, delta: str | None = None, spark=None) -> None:
+    status = TONE_LABELS.get(tone, "Watch")
+    badge = delta or status
+    _html(
         f"""
-        <div class="pm-metric" style="--card-accent:{tone};--status-bg:{status_bg};--status-fg:{status_fg};">
-            <div class="pm-kicker">{kicker}</div>
-            <div class="pm-value" style="color:{tone};">{value}</div>
-            <div class="pm-label">{label}</div>
-            <div class="pm-status"><span class="pm-dot"></span>{status}</div>
+        <div class="pm-card pm-kpi">
+            <div class="pm-kpi-top">
+                <div class="pm-eyebrow">{label}</div>
+                <span class="pm-badge" style="--tone:{tone};" title="{status}">{badge}</span>
+            </div>
+            <div class="pm-kpi-value">{value}</div>
+            <div class="pm-kpi-foot">
+                <div class="pm-kpi-plan">{plan_label} <b>{plan_value}</b></div>
+                {_sparkline(spark, tone) if spark is not None else ""}
+            </div>
         </div>
-        """,
-        unsafe_allow_html=True,
+        """
     )
+
+
+def _delta(actual, plan, as_points: bool = False) -> str | None:
+    if pd.isna(actual) or pd.isna(plan) or (not as_points and not plan):
+        return None
+    if as_points:
+        change = (actual - plan) * 100
+        return f"{'▲' if change >= 0 else '▼'} {abs(change):.1f} pts"
+    change = (actual - plan) / abs(plan)
+    return f"{'▲' if change >= 0 else '▼'} {abs(change):.0%}"
 
 
 def _status_tone(actual, plan, invert: bool = False) -> str:
     if pd.isna(actual) or pd.isna(plan):
-        return "#F59E0B"
+        return TOKENS["warning"]
     good = actual >= plan if not invert else actual <= plan
     gap = abs(actual - plan) / abs(plan) if plan not in (0, None) else 0
-    if good and gap <= 0.1:
-        return "#22C55E"
     if good:
-        return "#22C55E"
+        return TOKENS["positive"]
     if gap <= 0.1:
-        return "#F59E0B"
-    return "#EF4444"
+        return TOKENS["warning"]
+    return TOKENS["negative"]
 
 
 def _performance_summary(row) -> str:
@@ -146,7 +210,7 @@ def _performance_summary(row) -> str:
     return f"The store is currently {direction} in March 2026 because {reason}."
 
 
-def _insights_block(row, current_projection, base_flags, safety_threshold) -> list[str]:
+def _insights_block(row, current_projection, base_flags, safety_threshold) -> list[tuple[str, str, str]]:
     revenue_pct = row.get("revenue_variance_pct")
     margin_points = row.get("gross_margin_pct_variance")
     revenue_sentence = (
@@ -167,32 +231,42 @@ def _insights_block(row, current_projection, base_flags, safety_threshold) -> li
         if base_flags.safe_draw_month
         else f"At the current scenario the business does not yet support owner draws while holding the cash threshold of {_currency(safety_threshold)}."
     )
-    return [revenue_sentence, margin_sentence, run_rate_sentence, cash_sentence]
+    def tone(good) -> str:
+        if good is None:
+            return TOKENS["warning"]
+        return TOKENS["positive"] if good else TOKENS["negative"]
+
+    on_pace = current_projection["projected_month_revenue"] >= (row.get("revenue_plan") or 0)
+    return [
+        (tone(None if pd.isna(revenue_pct) else revenue_pct >= 0), "$", revenue_sentence),
+        (tone(None if pd.isna(margin_points) else margin_points >= 0), "%", margin_sentence),
+        (tone(on_pace), "↗" if on_pace else "↘", run_rate_sentence),
+        (tone(bool(base_flags.safe_draw_month)), "◆", cash_sentence),
+    ]
 
 
-st.markdown(
-    """
-    <div class="pm-topbar">
-        <div style="display:flex;justify-content:space-between;gap:1rem;align-items:center;flex-wrap:wrap;">
+_html(
+    f"""
+    <div class="pm-header">
+        <div class="pm-brand-row">
+            <div class="pm-logo">P</div>
             <div>
-                <div class="pm-brand">PayMore Chinook</div>
-                <div style="color:#94A3B8;font-size:.95rem;max-width:52rem;">Retail operating dashboard for sales, margin, staffing, cash discipline, and store-level decisions.</div>
-            </div>
-            <div style="display:flex;gap:.65rem;flex-wrap:wrap;">
-                <div style="padding:.65rem .95rem;background:#151A23;border-radius:12px;border:1px solid rgba(255,255,255,.08);color:#E5E7EB;font-weight:700;">AB01</div>
-                <div style="padding:.65rem .95rem;background:#151A23;border-radius:12px;border:1px solid rgba(255,255,255,.08);color:#94A3B8;font-weight:700;">Retail Ops</div>
-                <div style="padding:.65rem .95rem;background:#151A23;border-radius:12px;border:1px solid rgba(59,130,246,.24);color:#93C5FD;font-weight:700;">Scenario Ready</div>
+                <div class="pm-title">PayMore Chinook <span style="color:{TOKENS['muted']};font-weight:500;">Command</span></div>
+                <div class="pm-subtitle">Sales, margin, staffing and cash, measured against the pro forma.</div>
             </div>
         </div>
+        <div class="pm-chips">
+            <span class="pm-chip">Store AB01</span>
+            <span class="pm-chip">As of {CURRENT_DATE.strftime('%b %-d, %Y')}</span>
+            <span class="pm-chip is-accent"><span class="pm-live"></span>Scenario ready</span>
+        </div>
     </div>
-    """,
-    unsafe_allow_html=True,
+    """
 )
 
 sidebar = st.sidebar
-sidebar.markdown("## Inputs")
-sidebar.caption("The pro forma is built into the app. Upload your PayMore sales report or edit monthly operating inputs below.")
-sidebar.markdown(f"Using built-in pro forma: `{DEFAULT_PRO_FORMA.name}`")
+sidebar.markdown("## Data")
+sidebar.caption(f"Pro forma: `{DEFAULT_PRO_FORMA.name}` (built in). Upload a PayMore sales report to override actuals.")
 actuals_upload = sidebar.file_uploader("PayMore sales report or actuals CSV/XLSX", type=["csv", "xlsx"])
 
 budget = _load_budget(str(DEFAULT_PRO_FORMA))
@@ -209,7 +283,7 @@ except ValueError as exc:
 actuals_editor = sidebar.checkbox("Edit actuals in app", value=True)
 actuals_frame = uploaded_actuals.copy()
 
-sidebar.markdown("### Base Assumptions")
+sidebar.markdown("### Base assumptions")
 safety_threshold = sidebar.number_input("Safety cash threshold", min_value=0.0, value=20000.0, step=1000.0)
 march_plan = plan.loc[plan["period"] == pd.Timestamp("2026-03-01")] if not plan.empty else pd.DataFrame()
 base_margin = _first_numeric(march_plan["gross_margin_pct"] if "gross_margin_pct" in march_plan else pd.Series(dtype="float64"), 0.4)
@@ -219,11 +293,11 @@ base_purchases = _first_numeric(march_plan["purchase_count"] if "purchase_count"
 base_avg_sale = _first_numeric(march_plan["avg_sale_value"] if "avg_sale_value" in march_plan else pd.Series(dtype="float64"), 245.0)
 base_avg_purchase = _first_numeric(march_plan["avg_purchase_value"] if "avg_purchase_value" in march_plan else pd.Series(dtype="float64"), 700.0)
 
-sidebar.markdown("### Global Defaults")
+sidebar.markdown("### Global defaults")
 loan_payments = sidebar.number_input("Monthly loan payments", min_value=0.0, value=0.0, step=100.0)
 
 if actuals_editor:
-    with st.expander("Actuals Input", expanded=False):
+    with st.expander("Edit monthly actuals", expanded=False, icon=":material/table_edit:"):
         st.markdown("Enter monthly numbers from the PayMore dashboard here, or upload a CSV/XLSX from the sidebar. Charts update immediately from the values below.")
         st.caption("Default sample data is included for January, February, and March 2026.")
         if upload_error:
@@ -246,7 +320,7 @@ if actuals_editor:
         )
         editable["month"] = pd.to_datetime(editable["month"]).dt.strftime("%Y-%m-%d")
         editable = editable[[*REQUIRED_COLUMNS, *OPTIONAL_COLUMNS]]
-        edited = st.data_editor(editable, use_container_width=True, num_rows="dynamic", hide_index=True)
+        edited = st.data_editor(editable, width="stretch", num_rows="dynamic", hide_index=True)
         try:
             actuals = normalize_actuals(edited)
             st.success("Actuals loaded successfully. Charts and KPI cards are using the current table values.")
@@ -255,7 +329,7 @@ if actuals_editor:
             actuals = default_actuals.copy()
             fallback = actuals_template(default_actuals)
             st.caption("Showing the default workbook actuals until the input table is corrected.")
-            st.dataframe(fallback, use_container_width=True, hide_index=True)
+            st.dataframe(fallback, width="stretch", hide_index=True)
 else:
     actuals = actuals_frame
 
@@ -328,59 +402,81 @@ annualized_run_rate = current_projection["projected_month_revenue"] * 12
 summary_sentence = _performance_summary(current_row)
 insights = _insights_block(current_row, current_projection, base_flags, safety_threshold)
 
+current_cash = actuals["cash_balance"].iloc[-1] if not actuals.empty else 0
+cash_tone = TOKENS["positive"] if current_cash >= safety_threshold else TOKENS["negative"]
+forecast_tone = TOKENS["positive"] if current_projection["projected_month_revenue"] >= (current_row.get("revenue_plan") or 0) else TOKENS["negative"]
+history = comparison_display.loc[comparison_display["period"] <= current_month]
+cash_history = actuals["cash_balance"] if "cash_balance" in actuals else None
+
 overview_cards = st.columns(4)
 with overview_cards[0]:
-    _metric_card("Revenue", _currency(current_row.get("revenue_actual")), "vs plan", _status_tone(current_row.get("revenue_actual"), current_row.get("revenue_plan")))
+    _metric_card(
+        "Revenue · MTD", _currency(current_row.get("revenue_actual")),
+        _status_tone(current_row.get("revenue_actual"), current_row.get("revenue_plan")),
+        "Plan", _currency(current_row.get("revenue_plan")),
+        _delta(current_row.get("revenue_actual"), current_row.get("revenue_plan")),
+        history.get("revenue_display"),
+    )
 with overview_cards[1]:
-    _metric_card("Gross Margin", _pct(current_row.get("gross_margin_pct_actual")), "vs plan", _status_tone(current_row.get("gross_margin_pct_actual"), current_row.get("gross_margin_pct_plan")))
-current_cash = actuals['cash_balance'].iloc[-1] if not actuals.empty else 0
-cash_tone = "#22C55E" if current_cash >= safety_threshold else "#EF4444"
-forecast_tone = "#22C55E" if current_projection["projected_month_revenue"] >= (current_row.get("revenue_plan") or 0) else "#EF4444"
+    _metric_card(
+        "Gross margin", _pct(current_row.get("gross_margin_pct_actual")),
+        _status_tone(current_row.get("gross_margin_pct_actual"), current_row.get("gross_margin_pct_plan")),
+        "Plan", _pct(current_row.get("gross_margin_pct_plan")),
+        _delta(current_row.get("gross_margin_pct_actual"), current_row.get("gross_margin_pct_plan"), as_points=True),
+        history.get("gross_margin_pct_display"),
+    )
 with overview_cards[2]:
-    _metric_card("Cash Balance", _currency(current_cash), "threshold check", cash_tone)
+    _metric_card(
+        "Cash balance", _currency(current_cash), cash_tone,
+        "Threshold", _currency(safety_threshold),
+        _delta(current_cash, safety_threshold),
+        cash_history,
+    )
 with overview_cards[3]:
-    _metric_card("Forecast Revenue", _currency(current_projection["projected_month_revenue"]), "run rate", forecast_tone)
+    _metric_card(
+        "Month forecast", _currency(current_projection["projected_month_revenue"]), forecast_tone,
+        "Plan", _currency(current_row.get("revenue_plan")),
+        _delta(current_projection["projected_month_revenue"], current_row.get("revenue_plan")),
+    )
 
-tabs = st.tabs(["Overview", "Actual vs Pro Forma", "Scenarios", "Cash Planning", "Operating Metrics"])
+tabs = st.tabs([
+    ":material/dashboard: Overview",
+    ":material/compare_arrows: Actual vs Pro Forma",
+    ":material/tune: Scenarios",
+    ":material/account_balance_wallet: Cash Planning",
+    ":material/storefront: Operating Metrics",
+])
 
 with tabs[0]:
-    hero_left, hero_mid, hero_right = st.columns([1.15, 0.9, 0.75])
+    hero_left, hero_mid, hero_right = st.columns([1.15, 1.0, 0.75])
     with hero_left:
-        st.markdown(
+        _html(
             f"""
-            <div class="pm-summary">
-                <div style="font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:#94A3B8;">Executive Summary</div>
-                <div style="font-size:1.4rem;font-weight:800;margin-top:.55rem;color:#F8FAFC;line-height:1.35;">{summary_sentence}</div>
-                <div style="margin-top:.75rem;color:#94A3B8;">Built for day-to-day retail operating decisions using current actuals and the pro forma baseline.</div>
+            <div class="pm-card pm-hero">
+                <div class="pm-eyebrow">Executive summary</div>
+                <div class="pm-hero-text">{summary_sentence}</div>
+                <div class="pm-hero-note">Current actuals measured against the pro forma baseline.</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
     with hero_mid:
         insight_markup = "".join(
-            f'<div style="padding:.5rem 0;border-bottom:1px solid rgba(148,163,184,0.14);color:#334155;">{line}</div>'
-            for line in insights[:-1]
-        ) + f'<div style="padding:.5rem 0;color:#334155;">{insights[-1]}</div>'
-        st.markdown(
-            f"""
-            <div class="pm-panel">
-                <div style="font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:#94A3B8;">Insights</div>
-                <div style="margin-top:.45rem;">{insight_markup}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
+            f'<div class="pm-insight"><span class="pm-insight-icon" style="--tone:{tone};">{icon}</span><span>{text}</span></div>'
+            for tone, icon, text in insights
         )
+        _html(f'<div class="pm-card"><div class="pm-eyebrow">Insights</div><div style="margin-top:.4rem;">{insight_markup}</div></div>')
     with hero_right:
-        st.markdown(
+        _html(
             f"""
-            <div class="pm-runrate">
-                <div style="font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:#93C5FD;">Annualized March Run Rate</div>
-                <div style="font-size:2.3rem;font-weight:800;margin-top:.45rem;color:#F8FAFC;">{_currency(annualized_run_rate)}</div>
-                <div style="margin-top:.4rem;color:#94A3B8;">Annualized from March 2026 actuals-to-date.</div>
+            <div class="pm-card pm-runrate">
+                <div class="pm-eyebrow">Annualized run rate</div>
+                <div class="pm-big">{_currency(annualized_run_rate)}</div>
+                <div class="pm-hero-note">From {CURRENT_DATE.strftime('%B %Y')} actuals to date.</div>
+                <div style="margin-top:1rem;">{_stats([("Full-year revenue", _currency(year_projection["projected_year_revenue"])), ("Full-year profit", _currency(year_projection["projected_year_profit"]))], cols=1)}</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
+    st.write("")
 
     row_one = st.columns(2)
     with row_one[0]:
@@ -394,30 +490,43 @@ with tabs[0]:
 
     row_two = st.columns([0.95, 1.05])
     with row_two[0]:
-        st.markdown('<div class="pm-panel">', unsafe_allow_html=True)
-        st.markdown("#### Run-Rate Snapshot")
-        st.caption("Definitions: Positive cash flow month is the first month when monthly net cash flow turns positive and stays positive after that. Safe owner draw means a recurring monthly draw that still keeps projected cash above the safety threshold for every following month.")
-        st.markdown(f"Projected current month revenue: **{_currency(current_projection['projected_month_revenue'])}**")
-        st.markdown(f"Projected current month profit: **{_currency(current_projection['projected_month_profit'])}**")
-        st.markdown(f"Projected full-year revenue: **{_currency(year_projection['projected_year_revenue'])}**")
-        st.markdown(f"Projected full-year profit: **{_currency(year_projection['projected_year_profit'])}**")
-        st.markdown("---")
-        st.markdown(f"First positive cash flow month: **{_month(base_flags.positive_cash_flow_month)}**")
-        st.markdown(f"Capital injection month: **{_month(base_flags.first_injection_month)}**")
-        st.markdown(f"Required injection: **{_currency(base_flags.required_injection)}**")
-        st.markdown(f"Earliest safe owner draw month: **{_month(base_flags.safe_draw_month)}**")
-        st.markdown(f"Suggested safe monthly draw: **{_currency(base_flags.suggested_draw)}**")
-        st.markdown("</div>", unsafe_allow_html=True)
+        with st.container(border=True, key="card_runrate"):
+            _html('<div class="pm-section-title">Run-rate snapshot</div><div class="pm-section-sub">Medium case, current month and full year.</div>')
+            _html(
+                _stats(
+                    [
+                        ("Month revenue", _currency(current_projection["projected_month_revenue"])),
+                        ("Month profit", _currency(current_projection["projected_month_profit"])),
+                        ("Full-year revenue", _currency(year_projection["projected_year_revenue"])),
+                        ("Full-year profit", _currency(year_projection["projected_year_profit"])),
+                    ]
+                )
+            )
+            _html(
+                '<div style="margin-top:.8rem;">'
+                + _rows(
+                    [
+                        ("First positive cash flow month", _month(base_flags.positive_cash_flow_month)),
+                        ("Capital injection month", _month(base_flags.first_injection_month)),
+                        ("Required injection", _currency(base_flags.required_injection)),
+                        ("Earliest safe owner draw", _month(base_flags.safe_draw_month)),
+                        ("Suggested monthly draw", _currency(base_flags.suggested_draw)),
+                    ]
+                )
+                + "</div>"
+            )
+            st.caption("Positive cash flow month: first month net cash flow turns positive and stays positive. Safe owner draw: a recurring draw that keeps projected cash above the threshold every month after.")
     with row_two[1]:
         _plot(waterfall_chart(current_row), "overview_revenue_to_cashflow")
 
 with tabs[1]:
-    metric_for_table = st.selectbox(
+    metric_for_table = st.segmented_control(
         "Variance metric",
         options=["revenue", "gross_margin_pct", "payroll", "net_operating_profit", "cash_flow"],
-        index=0,
+        format_func=lambda m: METRIC_LABELS.get(m, m),
+        default="revenue",
         key="variance_metric",
-    )
+    ) or "revenue"
     chart_row_1 = st.columns(2)
     with chart_row_1[0]:
         revenue_chart = comparison_display.copy()
@@ -446,16 +555,24 @@ with tabs[1]:
     with chart_row_3[1]:
         _plot(variance_combo(comparison, metric_for_table, "Variance to Plan"), "actuals_variance_to_plan")
 
-    st.markdown("#### Variance Table")
-    variance_df = variance_table(comparison, metric_for_table)
-    if "Variance %" in variance_df.columns:
-        variance_df["Variance %"] = variance_df["Variance %"].map(lambda value: None if pd.isna(value) else f"{value:.1%}")
-    st.dataframe(variance_df, use_container_width=True, hide_index=True)
+    with st.container(border=True, key="card_variance_table"):
+        _html('<div class="pm-section-title">Variance table</div>')
+        variance_df = variance_table(comparison, metric_for_table)
+        if "Variance %" in variance_df.columns:
+            variance_df["Variance %"] = variance_df["Variance %"].map(lambda value: "—" if pd.isna(value) else f"{value:.1%}")
+        if "Month" in variance_df.columns:
+            variance_df["Month"] = variance_df["Month"].map(_month)
+        value_format = _pct if metric_for_table.endswith("_pct") else _currency
+        for column in ["Actual", "Projected", "Variance"]:
+            if column in variance_df.columns:
+                variance_df[column] = variance_df[column].map(lambda value: "—" if pd.isna(value) else value_format(value))
+        st.dataframe(variance_df, width="stretch", hide_index=True)
 
 with tabs[2]:
-    st.markdown("### Scenario Engine")
-    st.caption("Adjust the operational levers below. Each scenario recalculates revenue, margin, staffing, cash flow, safety threshold, capital injection, and owner draw timing.")
-    st.info("Positive cash flow month = first month when monthly net cash flow turns positive and remains positive in all following months. Safe owner draw = a recurring monthly draw that still leaves projected cash above the safety threshold for all following months.")
+    _html(
+        '<div class="pm-section-title" style="font-size:1.15rem;">Scenario engine</div>'
+        '<div class="pm-section-sub">Adjust the levers for each case. Revenue, margin, staffing, cash flow, capital injection and owner draw timing all recalculate.</div>'
+    )
     input_cols = st.columns(3)
     scenario_assumptions = {
         "Best Case": _scenario_inputs(input_cols[0], "Best Case", scenario_defaults["Best Case"]),
@@ -481,21 +598,36 @@ with tabs[2]:
     summary_cols = st.columns(3)
     for idx, summary in enumerate(scenario_summaries):
         with summary_cols[idx]:
-            st.markdown('<div class="pm-panel">', unsafe_allow_html=True)
-            st.markdown(f"#### {summary.scenario}")
-            st.write(f"Monthly revenue: {_currency(summary.monthly_revenue)}")
-            st.write(f"Monthly gross profit: {_currency(summary.monthly_gross_profit)}")
-            st.write(f"Monthly operating profit: {_currency(summary.monthly_operating_profit)}")
-            st.write(f"Monthly net cash flow: {_currency(summary.monthly_net_cash_flow)}")
-            st.write(f"Ending cash balance: {_currency(summary.ending_cash_balance)}")
-            st.write(f"First positive cash flow month: {_month(summary.positive_cash_flow_month)}")
-            st.write(f"Cash falls below threshold: {_month(summary.threshold_breach_month)}")
-            st.write(f"Capital injection needed: {_currency(summary.capital_injection_needed)}")
-            st.write(f"Earliest safe owner draw month: {_month(summary.safe_distribution_month)}")
-            st.write(f"Suggested safe monthly draw: {_currency(summary.suggested_monthly_distribution)}")
-            if draw_warnings[summary.scenario]:
-                st.warning("This owner draw level causes the business to require additional capital.")
-            st.markdown("</div>", unsafe_allow_html=True)
+            warning = (
+                '<div class="pm-callout">This owner draw level means the business needs extra capital.</div>'
+                if draw_warnings[summary.scenario]
+                else ""
+            )
+            _html(
+                f"""
+                <div class="pm-card">
+                    <div class="pm-scenario-head">
+                        <span class="pm-scenario-dot" style="--tone:{SCENARIO_COLORS.get(summary.scenario, TOKENS['muted'])};"></span>
+                        <span class="pm-scenario-name">{summary.scenario}</span>
+                    </div>
+                    {_stats([("Monthly revenue", _currency(summary.monthly_revenue)), ("Ending cash", _currency(summary.ending_cash_balance))])}
+                    <div style="margin-top:.7rem;">
+                    {_rows([
+                        ("Gross profit / mo", _currency(summary.monthly_gross_profit)),
+                        ("Operating profit / mo", _currency(summary.monthly_operating_profit)),
+                        ("Net cash flow / mo", _currency(summary.monthly_net_cash_flow)),
+                        ("First positive cash flow", _month(summary.positive_cash_flow_month)),
+                        ("Below threshold", _month(summary.threshold_breach_month)),
+                        ("Capital injection", _currency(summary.capital_injection_needed)),
+                        ("Earliest safe draw", _month(summary.safe_distribution_month)),
+                        ("Suggested draw / mo", _currency(summary.suggested_monthly_distribution)),
+                    ])}
+                    </div>
+                    {warning}
+                </div>
+                """
+            )
+    st.write("")
 
     chart_left, chart_right = st.columns([1.1, 0.9])
     with chart_left:
@@ -514,18 +646,23 @@ with tabs[2]:
             scenario_df[col] = scenario_df[col].map(_currency)
         for col in ["positive_cash_flow_month", "threshold_breach_month", "safe_distribution_month"]:
             scenario_df[col] = scenario_df[col].map(_month)
-        st.dataframe(scenario_df, use_container_width=True, hide_index=True)
+        with st.container(border=True, key="card_scenario_table"):
+            _html('<div class="pm-section-title">Scenario comparison</div>')
+            table = scenario_df.set_index("scenario").T
+            table.index = [label.replace("_", " ").capitalize() for label in table.index]
+            st.dataframe(table, width="stretch")
 
-    metric_choice = st.selectbox(
+    metric_choice = st.segmented_control(
         "Scenario chart metric",
         options=["revenue", "gross_profit", "net_operating_profit", "cash_flow", "cash_balance"],
-        index=0,
+        format_func=lambda m: METRIC_LABELS.get(m, m),
+        default="revenue",
         key="scenario_metric_choice",
-    )
+    ) or "revenue"
     scenario_metric_fig = multi_scenario_metric_chart(
         scenario_frames,
         metric_choice,
-        f"Scenario Lens: {metric_choice.replace('_', ' ').title()}",
+        f"Scenario lens: {METRIC_LABELS.get(metric_choice, metric_choice)}",
     )
     _plot(scenario_metric_fig, "scenario_metric_lens")
 
@@ -534,32 +671,51 @@ with tabs[3]:
     with cash_left:
         _plot(scenario_cash_chart(scenario_frames, safety_threshold), "cash_planning_projection")
     with cash_right:
-        st.markdown('<div class="pm-panel">', unsafe_allow_html=True)
-        st.markdown("#### Cash Planning Summary")
         cash_table = pd.DataFrame(
             [
                 {"Scenario": name, "Positive cash flow month": _month(flags.positive_cash_flow_month), "Injection month": _month(flags.first_injection_month), "Required injection": _currency(flags.required_injection), "Safe draw month": _month(flags.safe_draw_month), "Suggested draw": _currency(flags.suggested_draw), "Draw warning": "Owner draw triggers capital need" if draw_warnings[name] else "No draw warning"}
                 for name, flags in scenario_flags.items()
             ]
         )
-        st.dataframe(cash_table, use_container_width=True, hide_index=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        for name, flags in scenario_flags.items():
+            warning = '<div class="pm-callout">Owner draw triggers a capital need.</div>' if draw_warnings[name] else ""
+            _html(
+                f"""
+                <div class="pm-card" style="margin-bottom:.75rem;">
+                    <div class="pm-scenario-head">
+                        <span class="pm-scenario-dot" style="--tone:{SCENARIO_COLORS.get(name, TOKENS['muted'])};"></span>
+                        <span class="pm-scenario-name">{name}</span>
+                    </div>
+                    {_rows([
+                        ("Positive cash flow", _month(flags.positive_cash_flow_month)),
+                        ("Injection month", _month(flags.first_injection_month)),
+                        ("Required injection", _currency(flags.required_injection)),
+                        ("Safe draw month", _month(flags.safe_draw_month)),
+                        ("Suggested draw", _currency(flags.suggested_draw)),
+                    ])}
+                    {warning}
+                </div>
+                """
+            )
+    with st.container(border=True, key="card_cash_table"):
+        _html('<div class="pm-section-title">Cash planning table</div>')
+        st.dataframe(cash_table, width="stretch", hide_index=True)
 
 with tabs[4]:
     op_row_1 = st.columns(2)
     with op_row_1[0]:
-        _plot(operating_metrics_chart(comparison, "sales_count_actual", "Sales Count by Month", "#7BC043"), "ops_sales_count")
+        _plot(operating_metrics_chart(comparison, "sales_count_actual", "Sales Count by Month", "#34D399"), "ops_sales_count")
     with op_row_1[1]:
-        _plot(operating_metrics_chart(comparison, "purchase_count_actual", "Purchase Count by Month", "#377DFF"), "ops_purchase_count")
+        _plot(operating_metrics_chart(comparison, "purchase_count_actual", "Purchase Count by Month", "#818CF8"), "ops_purchase_count")
 
     op_row_2 = st.columns(2)
     with op_row_2[0]:
-        _plot(operating_metrics_chart(comparison, "avg_sale_value_actual", "Average Sale Value", "#F5B700"), "ops_avg_sale_value")
+        _plot(operating_metrics_chart(comparison, "avg_sale_value_actual", "Average Sale Value", "#FBBF24"), "ops_avg_sale_value")
     with op_row_2[1]:
-        _plot(operating_metrics_chart(comparison, "avg_purchase_value_actual", "Average Purchase Value", "#8E6CEF"), "ops_avg_purchase_value")
+        _plot(operating_metrics_chart(comparison, "avg_purchase_value_actual", "Average Purchase Value", "#C084FC"), "ops_avg_purchase_value")
 
     op_row_3 = st.columns(2)
     with op_row_3[0]:
-        _plot(operating_metrics_chart(comparison, "sales_per_staff_hour_actual", "Sales per Staff Hour", "#F45B69"), "ops_sales_per_staff_hour")
+        _plot(operating_metrics_chart(comparison, "sales_per_staff_hour_actual", "Sales per Staff Hour", "#F87171"), "ops_sales_per_staff_hour")
     with op_row_3[1]:
-        _plot(operating_metrics_chart(comparison, "inventory_value_actual", "Inventory Value", "#17B7A5"), "ops_inventory_value")
+        _plot(operating_metrics_chart(comparison, "inventory_value_actual", "Inventory Value", "#38BDF8"), "ops_inventory_value")
